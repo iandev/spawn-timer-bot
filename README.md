@@ -56,6 +56,7 @@ A Discord bot for managing spawn timers.
 
 To start the Discord bot, run:
 ```bash
+source .env
 bundle exec ruby bot.rb
 ```
 
@@ -63,5 +64,6 @@ bundle exec ruby bot.rb
 
 To start the web interface, run:
 ```bash
+source .env
 bundle exec ruby webapp.rb
 ```
