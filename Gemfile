@@ -1,4 +1,4 @@
-ruby "2.7.2"
+ruby "3.4.7"
 
 source 'https://rubygems.org'
 git_source(:github) do |repo_name|
@@ -31,3 +31,6 @@ end
 group :test do
   gem 'database_cleaner-sequel'
 end
+
+gem "rackup", "~> 2.2"
+gem "puma", "~> 7.1"
