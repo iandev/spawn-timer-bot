@@ -24,8 +24,8 @@ A Discord bot for managing spawn timers.
     
     Once RVM is installed, install a recent version of Ruby:
     ```bash
-    rvm install 3.2.2
-    rvm use 3.2.2 --default
+    rvm install 3.4.7
+    rvm use 3.4.7 --default
     ```
 
 ### Setup
