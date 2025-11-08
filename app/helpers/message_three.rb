@@ -6,7 +6,7 @@ def build_timer_message_three(timers: nil)
   upcoming_window = []
   future_window = []
   number_of_blocks = 14
-
+  max_fields_per_embed = 25
 
   timers ||= Timer.all
   timers = timers.sort_by {|timer| next_spawn_time_start(timer.name, timer: timer) || Chronic.parse("100 years from now") }
@@ -136,14 +136,14 @@ def build_timer_message_three(timers: nil)
   embeds << Proc.new {|embed|
     embed.color = any_in_window ? 15105570 : 3066993
     embed.title = any_in_window ? "Mobs In Window" : "Nothing Currently in Window"
-    embed.fields = mobs_in_window.map {|m| m[:message] }
+    embed.fields = mobs_in_window.take(max_fields_per_embed).map {|m| m[:message] }
     embed.footer =  Discordrb::Webhooks::EmbedFooter.new(text: any_in_window ? "These are currently in window! Be prepared! • Today at #{Time.now.strftime("%I:%M:%S %p")}" : "There is currently nothing in window! • Today at #{Time.now.strftime("%I:%M:%S %p")}")
   }
 
   embeds << Proc.new {|embed|
     embed.color = 3447003
     embed.title = "Mobs Entering Window In The Next 24 Hours"
-    embed.fields = upcoming_window
+    embed.fields = upcoming_window.take(max_fields_per_embed)
   }
 
   if SHOW_FUTURE_WINDOW && future_window.size > 0
@@ -193,6 +193,7 @@ def build_timer_message_three(timers: nil)
       begin
         client.edit_message(webhook_message_id, builder: builder)
       rescue => ex
+        puts ex
         if ex.message =~ /404 Not Found/
           result = client.execute(builder, true)
           response = JSON.parse(result.body)
