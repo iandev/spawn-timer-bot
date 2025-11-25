@@ -37,11 +37,11 @@ while true
           if in_window(timer.name, timer: timer)
             if timer.window_end || timer.variance
               if TIMER_ALERT_CHANNEL_ID.to_s.length > 0
-                BOT.send_message(TIMER_ALERT_CHANNEL_ID, "#{everyone_alert}**#{timer.name}** is in window for #{display_time_distance(next_spawn)}!")
+                #BOT.send_message(TIMER_ALERT_CHANNEL_ID, "#{everyone_alert}**#{timer.name}** is in window for #{display_time_distance(next_spawn)}!")
               end
             else
               if TIMER_ALERT_CHANNEL_ID.to_s.length > 0
-                BOT.send_message(TIMER_ALERT_CHANNEL_ID, "#{everyone_alert}**#{timer.name}** timer is up!")
+                #BOT.send_message(TIMER_ALERT_CHANNEL_ID, "#{everyone_alert}**#{timer.name}** timer is up!")
               end
               can_auto_tod = true
             end

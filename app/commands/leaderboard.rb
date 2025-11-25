@@ -90,9 +90,9 @@ BOT.command(:leaderboard) do |event, *args|
 
     tods = tods.where(Sequel.lit("LENGTH(display_name) > 0"))
                .limit(20)
+               .order(Sequel.desc(:count))
                .all
-               .sort_by {|tod| tod[:count] }
-               .reverse
+               #.sql
 
     if tods.size > 0
       users = Tod.order(Sequel.lit("created_at DESC"))
