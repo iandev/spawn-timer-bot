@@ -173,6 +173,7 @@ def build_timer_message_three(timers: nil)
           pred_time: Time.at(r["pred_time"]).in_time_zone(tz),
           pred_day_probability: r["pred_day_probability"],
           today_probability: r["today_probability"],
+          next_hour_probability: r["next_hour_probability"],
           pred_interval_50: {
             start: Time.at(r["pred_interval_50"]["start"]).in_time_zone(tz),
             end: Time.at(r["pred_interval_50"]["end"]).in_time_zone(tz)
@@ -193,6 +194,7 @@ def build_timer_message_three(timers: nil)
             pred_time: result[:pred_time].to_f,
             pred_day_probability: result[:pred_day_probability],
             today_probability: result[:today_probability],
+            next_hour_probability: result[:next_hour_probability],
             pred_interval_50: {
               start: result[:pred_interval_50][:start].to_f,
               end: result[:pred_interval_50][:end].to_f
@@ -211,6 +213,7 @@ def build_timer_message_three(timers: nil)
       pred_time = result[:pred_time]
       prob_pred_day = result[:pred_day_probability]
       prob_today = result[:today_probability]
+      prob_next_hour = result[:next_hour_probability]
       interval_50 = result[:pred_interval_50]
       interval_90 = result[:pred_interval_90]
       mae = result[:mae_seconds]
@@ -222,8 +225,9 @@ def build_timer_message_three(timers: nil)
         
         description = []
         description << "Point Prediction: **#{pred_time.strftime("%A, %B %d at %I:%M:%S %p %Z")}**"
-        description << "Prob Today: **#{(prob_today * 100).round(1)}%**"
-        description << "Prob Predicted Day: **#{(prob_pred_day * 100).round(1)}%**"
+        description << "Probability Predicted Day: **#{(prob_pred_day * 100).round(1)}%**"
+        description << "Probability Today: **#{(prob_today * 100).round(1)}%**"
+        description << "Probability Next Hour: **#{(prob_next_hour * 100).round(1)}%**"
         description << "50% PI: #{interval_50[:start].strftime("%b %d %I:%M %p")} – #{interval_50[:end].strftime("%b %d %I:%M %p")}"
         description << "90% PI: #{interval_90[:start].strftime("%b %d %I:%M %p")} – #{interval_90[:end].strftime("%b %d %I:%M %p")}"
         

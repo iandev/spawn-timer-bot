@@ -294,6 +294,7 @@ def predict_quake_bootstrap(event)
   pred_time = result[:pred_time]
   prob_pred_day = result[:pred_day_probability]
   prob_today = result[:today_probability]
+  prob_next_hour = result[:next_hour_probability]
   interval_50 = result[:pred_interval_50]
   interval_90 = result[:pred_interval_90]
   mae = result[:mae_seconds]
@@ -308,6 +309,7 @@ def predict_quake_bootstrap(event)
   output << "**Probabilities:**"
   output << "• On Predicted Day (#{pred_time.strftime("%Y-%m-%d")}): **#{(prob_pred_day * 100).round(1)}%**"
   output << "• Today: **#{(prob_today * 100).round(1)}%**"
+  output << "• Next Hour: **#{(prob_next_hour * 100).round(1)}%**"
   output << ""
   output << "**Prediction Intervals:**"
   output << "• 50% PI: #{interval_50[:start].strftime("%b %d %I:%M %p")} – #{interval_50[:end].strftime("%b %d %I:%M %p")}"
@@ -323,7 +325,7 @@ def bootstrap_quake_probabilities(timestamps,
                                  bootstrap_samples: 10_000,
                                  seed: nil)
   zone = Time.find_zone!(tz)
-  now = Time.current.in_time_zone(zone)
+  now  = Time.current.in_time_zone(zone)
 
   ys = timestamps.map(&:to_f)
   n = ys.length
@@ -361,6 +363,7 @@ def bootstrap_quake_probabilities(timestamps,
     sorted_arr[lo] * (1.0 - w) + sorted_arr[hi] * w
   end
 
+  # Midnight-to-midnight window (calendar day)
   day_window = lambda do |date|
     start = zone.local(date.year, date.month, date.day)
     [start.to_f, (start + 1.day).to_f]
@@ -382,15 +385,23 @@ def bootstrap_quake_probabilities(timestamps,
   pred_time = Time.at(yhat0).in_time_zone(zone)
   pred_date = pred_time.to_date
 
+  # --- windows we’ll score probabilities against ---
   pred_day_start, pred_day_end = day_window.call(pred_date)
-  today_start, today_end       = day_window.call(now.to_date)
+
+  today_start = now.to_f
+  today_end   = now.end_of_day.to_f
+
+  next_hour_start = now.to_f
+  next_hour_end   = next_hour_start + 3600.0
 
   # Center residuals for residual bootstrap
   mean_resid = residuals.sum / n.to_f
   centered_resids = residuals.map { |e| e - mean_resid }
 
-  hits_pred_day = 0
-  hits_today = 0
+  # --- bootstrap ---
+  hits_pred_day  = 0
+  hits_today     = 0
+  hits_next_hour = 0
   boot_pred_times = Array.new(bsz)
 
   bsz.times do |j|
@@ -402,8 +413,9 @@ def bootstrap_quake_probabilities(timestamps,
 
     boot_pred_times[j] = y0_star
 
-    hits_pred_day += 1 if (y0_star >= pred_day_start && y0_star < pred_day_end)
-    hits_today    += 1 if (y0_star >= today_start    && y0_star < today_end)
+    hits_pred_day  += 1 if (y0_star >= pred_day_start  && y0_star < pred_day_end)
+    hits_today     += 1 if (y0_star >= today_start     && y0_star < today_end)
+    hits_next_hour += 1 if (y0_star >= next_hour_start && y0_star < next_hour_end)
   end
 
   boot_pred_times.sort!
@@ -415,14 +427,17 @@ def bootstrap_quake_probabilities(timestamps,
   interval_50 = { start: Time.at(q25).in_time_zone(zone), end: Time.at(q75).in_time_zone(zone) }
   interval_90 = { start: Time.at(q05).in_time_zone(zone), end: Time.at(q95).in_time_zone(zone) }
 
-  prob_pred_day = hits_pred_day.to_f / bsz
-  prob_today    = hits_today.to_f / bsz
+  prob_pred_day  = hits_pred_day.to_f  / bsz
+  prob_today     = hits_today.to_f     / bsz       # between now and end of today
+  prob_next_hour = hits_next_hour.to_f / bsz       # between now and now+1h
 
   description = [
     "Bootstrap (#{bsz} sims) residual-bootstrap+refit on linear regression (index → timestamp).",
-    "Point prediction: #{pred_time.strftime("%A, %B %d, %Y %I:%M:%S %p %Z")}.",
-    "P(on predicted day #{pred_date})=#{(prob_pred_day * 100).round(1)}%.",
-    "P(today #{now.to_date})=#{(prob_today * 100).round(1)}%.",
+    "Now: #{now.strftime("%a %b %d %Y %I:%M:%S %p %Z")}.",
+    "Point prediction: #{pred_time.strftime("%a %b %d %Y %I:%M:%S %p %Z")} (predicted day #{pred_date}).",
+    "P(on predicted day)=#{(prob_pred_day * 100).round(1)}%.",
+    "P(by end of today)=#{(prob_today * 100).round(1)}%.",
+    "P(within next hour)=#{(prob_next_hour * 100).round(1)}%.",
     "50% PI=[#{interval_50[:start].strftime("%b %d %I:%M %p")} – #{interval_50[:end].strftime("%b %d %I:%M %p")}],",
     "90% PI=[#{interval_90[:start].strftime("%b %d %I:%M %p")} – #{interval_90[:end].strftime("%b %d %I:%M %p")}],",
     "MAE=#{(mae / 86_400.0).round(2)}d RMSE=#{(rmse / 86_400.0).round(2)}d."
@@ -435,8 +450,10 @@ def bootstrap_quake_probabilities(timestamps,
     pred_time: pred_time,
     pred_day_probability: prob_pred_day,
     today_probability: prob_today,
+    next_hour_probability: prob_next_hour,
     pred_interval_50: interval_50,
     pred_interval_90: interval_90,
     description: description
   }
 end
+
