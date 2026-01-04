@@ -11,13 +11,18 @@ def command_quake(event, *args)
 
   return if event.channel.id != COMMAND_CHANNEL_ID
 
-  if args.first.to_s.downcase == "predict"
+  if args.first.to_s.downcase == "predict2"
     predict_next_quake(event)
     return
   end
 
   if args.first.to_s.downcase == "chance"
     predict_quake_probability2(event)
+    return
+  end
+
+  if args.first.to_s.downcase == "predict"
+    predict_quake_bootstrap(event)
     return
   end
 
@@ -33,6 +38,7 @@ def command_quake(event, *args)
     output << ""
     output << "!quake [time]"
     output << "!quake predict"
+    output << "!quake predict2"
     output << "!quake chance"
     output << "!quake list"
     output << ""
@@ -266,3 +272,188 @@ def predict_quake_probability2(event)
 
   event.respond output.join("\n")
 end
+
+def predict_quake_bootstrap(event)
+  timestamps = Earthquake.order(:timestamp).pluck(:timestamp).map(&:to_f)
+
+  if timestamps.count < 3
+    event.respond "Not enough data for bootstrap prediction. Need at least 3 recorded quakes."
+    return
+  end
+
+  # Default to Eastern Time if ENV["TZ"] is not set
+  tz = ENV["TZ"] || "America/New_York"
+
+  begin
+    result = bootstrap_quake_probabilities(timestamps, tz: tz)
+  rescue => e
+    event.respond "Error calculating bootstrap probabilities: #{e.message}"
+    return
+  end
+
+  pred_time = result[:pred_time]
+  prob_pred_day = result[:pred_day_probability]
+  prob_today = result[:today_probability]
+  prob_next_hour = result[:next_hour_probability]
+  interval_50 = result[:pred_interval_50]
+  interval_90 = result[:pred_interval_90]
+  mae = result[:mae_seconds]
+  rmse = result[:rmse_seconds]
+
+  output = []
+  output << "**Quake Prediction (Bootstrap)**"
+  output << "Based on #{timestamps.count} recorded quakes (10,000 simulations)."
+  output << ""
+  output << "Point Prediction: **#{pred_time.strftime("%A, %B %d at %I:%M:%S %p %Z")}**"
+  output << ""
+  output << "**Probabilities:**"
+  output << "• On Predicted Day (#{pred_time.strftime("%Y-%m-%d")}): **#{(prob_pred_day * 100).round(1)}%**"
+  output << "• Today: **#{(prob_today * 100).round(1)}%**"
+  output << "• Next Hour: **#{(prob_next_hour * 100).round(1)}%**"
+  output << ""
+  output << "**Prediction Intervals:**"
+  output << "• 50% PI: #{interval_50[:start].strftime("%b %d %I:%M %p")} – #{interval_50[:end].strftime("%b %d %I:%M %p")}"
+  output << "• 90% PI: #{interval_90[:start].strftime("%b %d %I:%M %p")} – #{interval_90[:end].strftime("%b %d %I:%M %p")}"
+  output << ""
+  output << "Stats: MAE=#{(mae / 86_400.0).round(2)}d, RMSE=#{(rmse / 86_400.0).round(2)}d"
+
+  event.respond output.join("\n")
+end
+
+def bootstrap_quake_probabilities(timestamps,
+                                 tz: "America/New_York",
+                                 bootstrap_samples: 10_000,
+                                 seed: nil)
+  zone = Time.find_zone!(tz)
+  now  = Time.current.in_time_zone(zone)
+
+  ys = timestamps.map(&:to_f)
+  n = ys.length
+  raise ArgumentError, "Need at least 3 events (got #{n})." if n < 3
+
+  xs = (0...n).map(&:to_f)
+  x0 = n.to_f
+
+  # --- helpers ---
+  fit = lambda do |x_arr, y_arr|
+    nn = y_arr.length.to_f
+    sum_x  = x_arr.sum
+    sum_y  = y_arr.sum
+    sum_xy = x_arr.zip(y_arr).sum { |x, y| x * y }
+    sum_xx = x_arr.sum { |x| x * x }
+
+    denom = (nn * sum_xx) - (sum_x * sum_x)
+    raise "Regression denominator ~0 (degenerate x values)" if denom.abs < 1e-12
+
+    m = ((nn * sum_xy) - (sum_x * sum_y)) / denom
+    b = (sum_y - m * sum_x) / nn
+    [m, b]
+  end
+
+  predict = ->(m, b, x) { (m * x) + b }
+
+  quantile = lambda do |sorted_arr, p|
+    return nil if sorted_arr.empty?
+    p = [[p, 0.0].max, 1.0].min
+    i = p * (sorted_arr.length - 1)
+    lo = i.floor
+    hi = i.ceil
+    return sorted_arr[lo] if lo == hi
+    w = i - lo
+    sorted_arr[lo] * (1.0 - w) + sorted_arr[hi] * w
+  end
+
+  # Midnight-to-midnight window (calendar day)
+  day_window = lambda do |date|
+    start = zone.local(date.year, date.month, date.day)
+    [start.to_f, (start + 1.day).to_f]
+  end
+
+  rng = seed ? Random.new(seed) : Random.new
+  bsz = bootstrap_samples.to_i
+  raise ArgumentError, "bootstrap_samples must be >= 1000" if bsz < 1000
+
+  # --- original fit ---
+  m, b = fit.call(xs, ys)
+  yhat = xs.map { |x| predict.call(m, b, x) }
+  residuals = ys.zip(yhat).map { |y, yh| y - yh }
+
+  mae  = residuals.sum { |e| e.abs } / n.to_f
+  rmse = Math.sqrt(residuals.sum { |e| e * e } / n.to_f)
+
+  yhat0 = predict.call(m, b, x0)
+  pred_time = Time.at(yhat0).in_time_zone(zone)
+  pred_date = pred_time.to_date
+
+  # --- windows we’ll score probabilities against ---
+  pred_day_start, pred_day_end = day_window.call(pred_date)
+
+  today_start = now.to_f
+  today_end   = now.end_of_day.to_f
+
+  next_hour_start = now.to_f
+  next_hour_end   = next_hour_start + 3600.0
+
+  # Center residuals for residual bootstrap
+  mean_resid = residuals.sum / n.to_f
+  centered_resids = residuals.map { |e| e - mean_resid }
+
+  # --- bootstrap ---
+  hits_pred_day  = 0
+  hits_today     = 0
+  hits_next_hour = 0
+  boot_pred_times = Array.new(bsz)
+
+  bsz.times do |j|
+    boot_resids = Array.new(n) { centered_resids[rng.rand(n)] }
+    y_boot = yhat.zip(boot_resids).map { |yh, e| yh + e }
+
+    m_star, b_star = fit.call(xs, y_boot)
+    y0_star = predict.call(m_star, b_star, x0)
+
+    boot_pred_times[j] = y0_star
+
+    hits_pred_day  += 1 if (y0_star >= pred_day_start  && y0_star < pred_day_end)
+    hits_today     += 1 if (y0_star >= today_start     && y0_star < today_end)
+    hits_next_hour += 1 if (y0_star >= next_hour_start && y0_star < next_hour_end)
+  end
+
+  boot_pred_times.sort!
+  q05 = quantile.call(boot_pred_times, 0.05)
+  q25 = quantile.call(boot_pred_times, 0.25)
+  q75 = quantile.call(boot_pred_times, 0.75)
+  q95 = quantile.call(boot_pred_times, 0.95)
+
+  interval_50 = { start: Time.at(q25).in_time_zone(zone), end: Time.at(q75).in_time_zone(zone) }
+  interval_90 = { start: Time.at(q05).in_time_zone(zone), end: Time.at(q95).in_time_zone(zone) }
+
+  prob_pred_day  = hits_pred_day.to_f  / bsz
+  prob_today     = hits_today.to_f     / bsz       # between now and end of today
+  prob_next_hour = hits_next_hour.to_f / bsz       # between now and now+1h
+
+  description = [
+    "Bootstrap (#{bsz} sims) residual-bootstrap+refit on linear regression (index → timestamp).",
+    "Now: #{now.strftime("%a %b %d %Y %I:%M:%S %p %Z")}.",
+    "Point prediction: #{pred_time.strftime("%a %b %d %Y %I:%M:%S %p %Z")} (predicted day #{pred_date}).",
+    "P(on predicted day)=#{(prob_pred_day * 100).round(1)}%.",
+    "P(by end of today)=#{(prob_today * 100).round(1)}%.",
+    "P(within next hour)=#{(prob_next_hour * 100).round(1)}%.",
+    "50% PI=[#{interval_50[:start].strftime("%b %d %I:%M %p")} – #{interval_50[:end].strftime("%b %d %I:%M %p")}],",
+    "90% PI=[#{interval_90[:start].strftime("%b %d %I:%M %p")} – #{interval_90[:end].strftime("%b %d %I:%M %p")}],",
+    "MAE=#{(mae / 86_400.0).round(2)}d RMSE=#{(rmse / 86_400.0).round(2)}d."
+  ].join(" ")
+
+  {
+    slope_seconds_per_event: m,
+    mae_seconds: mae,
+    rmse_seconds: rmse,
+    pred_time: pred_time,
+    pred_day_probability: prob_pred_day,
+    today_probability: prob_today,
+    next_hour_probability: prob_next_hour,
+    pred_interval_50: interval_50,
+    pred_interval_90: interval_90,
+    description: description
+  }
+end
+
