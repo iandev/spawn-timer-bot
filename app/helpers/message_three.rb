@@ -157,6 +157,83 @@ def build_timer_message_three(timers: nil)
     }
   end
 
+  # --- Earthquake Prediction Embed ---
+  timestamps = Earthquake.order(:timestamp).pluck(:timestamp).map(&:to_f)
+  if timestamps.count >= 3
+    begin
+      tz = ENV["TZ"] || "America/New_York"
+
+      cached_json = Setting.find_by_key("quake_prediction_cache")
+      cache = cached_json ? JSON.parse(cached_json) : nil
+
+      result = nil
+      if cache && cache["updated_at"] && (Time.now.to_i - cache["updated_at"] < 3600)
+        r = cache["result"]
+        result = {
+          pred_time: Time.at(r["pred_time"]).in_time_zone(tz),
+          pred_day_probability: r["pred_day_probability"],
+          today_probability: r["today_probability"],
+          pred_interval_50: {
+            start: Time.at(r["pred_interval_50"]["start"]).in_time_zone(tz),
+            end: Time.at(r["pred_interval_50"]["end"]).in_time_zone(tz)
+          },
+          pred_interval_90: {
+            start: Time.at(r["pred_interval_90"]["start"]).in_time_zone(tz),
+            end: Time.at(r["pred_interval_90"]["end"]).in_time_zone(tz)
+          },
+          mae_seconds: r["mae_seconds"],
+          rmse_seconds: r["rmse_seconds"]
+        }
+      else
+        result = bootstrap_quake_probabilities(timestamps, tz: tz)
+
+        cache_payload = {
+          updated_at: Time.now.to_i,
+          result: {
+            pred_time: result[:pred_time].to_f,
+            pred_day_probability: result[:pred_day_probability],
+            today_probability: result[:today_probability],
+            pred_interval_50: {
+              start: result[:pred_interval_50][:start].to_f,
+              end: result[:pred_interval_50][:end].to_f
+            },
+            pred_interval_90: {
+              start: result[:pred_interval_90][:start].to_f,
+              end: result[:pred_interval_90][:end].to_f
+            },
+            mae_seconds: result[:mae_seconds],
+            rmse_seconds: result[:rmse_seconds]
+          }
+        }
+        Setting.save_by_key("quake_prediction_cache", cache_payload.to_json)
+      end
+      
+      pred_time = result[:pred_time]
+      prob_pred_day = result[:pred_day_probability]
+      prob_today = result[:today_probability]
+      interval_50 = result[:pred_interval_50]
+      interval_90 = result[:pred_interval_90]
+      mae = result[:mae_seconds]
+      rmse = result[:rmse_seconds]
+
+      embeds << Proc.new {|embed|
+        embed.title = "Quake Prediction (Bootstrap)"
+        embed.color = 9807270 # A distinct color (e.g., brownish/red)
+        
+        description = []
+        description << "Point Prediction: **#{pred_time.strftime("%A, %B %d at %I:%M:%S %p %Z")}**"
+        description << "Prob Today: **#{(prob_today * 100).round(1)}%**"
+        description << "Prob Predicted Day: **#{(prob_pred_day * 100).round(1)}%**"
+        description << "50% PI: #{interval_50[:start].strftime("%b %d %I:%M %p")} – #{interval_50[:end].strftime("%b %d %I:%M %p")}"
+        description << "90% PI: #{interval_90[:start].strftime("%b %d %I:%M %p")} – #{interval_90[:end].strftime("%b %d %I:%M %p")}"
+        
+        embed.description = description.join("\n")
+      }
+    rescue => ex
+      puts "Error generating quake embed: #{ex.message}"
+    end
+  end
+
   if TIMER_MESSAGE_THREE_ORDER == "reverse"
     embeds = embeds.reverse
   end
