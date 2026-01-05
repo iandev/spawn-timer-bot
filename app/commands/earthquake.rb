@@ -16,13 +16,18 @@ def command_quake(event, *args)
     return
   end
 
+  if args.first.to_s.downcase == "bootstrap"
+    predict_quake_bootstrap(event)
+    return
+  end
+
   if args.first.to_s.downcase == "chance"
-    predict_quake_probability2(event)
+    predict_quake_renewal(event)
     return
   end
 
   if args.first.to_s.downcase == "predict"
-    predict_quake_bootstrap(event)
+    predict_quake_renewal(event)
     return
   end
 
@@ -457,3 +462,193 @@ def bootstrap_quake_probabilities(timestamps,
   }
 end
 
+def predict_quake_renewal(event)
+  timestamps = Earthquake.order(:timestamp).pluck(:timestamp).map(&:to_f)
+
+  if timestamps.count < 2
+    event.respond "Not enough data for renewal prediction. Need at least 2 recorded quakes."
+    return
+  end
+
+  # Default to Eastern Time if ENV["TZ"] is not set
+  tz = ENV["TZ"] || "America/New_York"
+
+  begin
+    result = renewal_bootstrap_probabilities(timestamps, tz: tz)
+  rescue => e
+    event.respond "Error calculating renewal probabilities: #{e.message}"
+    return
+  end
+
+  pred_time = result[:pred_time]
+  prob_pred_day = result[:pred_day_probability]
+  prob_today = result[:today_probability]
+  prob_next_hour = result[:next_hour_probability]
+  interval_50 = result[:pred_interval_50]
+  interval_90 = result[:pred_interval_90]
+
+  output = []
+  output << "**Quake Prediction (Renewal Bootstrap)**"
+  output << "Based on #{timestamps.count} recorded quakes (50,000 simulations)."
+  output << ""
+  output << "Point Prediction: **#{pred_time.strftime("%A, %B %d at %I:%M:%S %p %Z")}**"
+  output << ""
+  output << "**Probabilities:**"
+  output << "• On Predicted Day (#{pred_time.strftime("%Y-%m-%d")}): **#{(prob_pred_day * 100).round(1)}%**"
+  output << "• Today: **#{(prob_today * 100).round(1)}%**"
+  output << "• Next Hour: **#{(prob_next_hour * 100).round(1)}%**"
+  output << ""
+  output << "**Prediction Intervals:**"
+  output << "• 50% PI: #{interval_50[:start].strftime("%b %d %I:%M %p")} – #{interval_50[:end].strftime("%b %d %I:%M %p")}"
+  output << "• 90% PI: #{interval_90[:start].strftime("%b %d %I:%M %p")} – #{interval_90[:end].strftime("%b %d %I:%M %p")}"
+
+  event.respond output.join("\n")
+end
+
+def renewal_bootstrap_probabilities(timestamps,
+                                   tz: "America/New_York",
+                                   bootstrap_samples: 50_000,
+                                   seed: nil,
+                                   half_life_intervals: 8.0,     # recency weighting over intervals (not events)
+                                   conditional_on_elapsed: true, # only sample intervals > time_since_last
+                                   max_resample_tries: 50)
+  zone = Time.find_zone!(tz)
+  now  = Time.current.in_time_zone(zone)
+
+  ts = timestamps.map(&:to_f).sort
+  n = ts.length
+  raise ArgumentError, "Need at least 2 events (got #{n})." if n < 2
+
+  last_ts = ts.last
+  time_since_last = now.to_f - last_ts
+  time_since_last = 0.0 if time_since_last < 0 # guard for clock skew
+
+  # Build intervals (seconds) oldest->newest
+  intervals = ts.each_cons(2).map { |a, b| b - a }.select { |d| d > 0 }
+  raise ArgumentError, "Need at least 1 positive interval" if intervals.empty?
+
+  # Recency weights on intervals: interval i corresponds to event pair (i, i+1)
+  # newest interval gets weight 1.0, older decay exponentially
+  k = intervals.length
+  lambda = Math.log(2.0) / half_life_intervals.to_f
+  weights = (0...k).map do |i|
+    age = (k - 1) - i
+    Math.exp(-lambda * age)
+  end
+  wsum = weights.sum
+  weights = weights.map { |w| w / wsum } # normalize
+
+  # Build CDF for weighted sampling
+  cdf = []
+  acc = 0.0
+  weights.each do |w|
+    acc += w
+    cdf << acc
+  end
+  cdf[-1] = 1.0
+
+  pick_index = lambda do |rng|
+    r = rng.rand
+    cdf.bsearch_index { |v| v >= r } || (cdf.length - 1)
+  end
+
+  quantile = lambda do |sorted_arr, p|
+    return nil if sorted_arr.empty?
+    p = [[p, 0.0].max, 1.0].min
+    i = p * (sorted_arr.length - 1)
+    lo = i.floor
+    hi = i.ceil
+    return sorted_arr[lo] if lo == hi
+    w = i - lo
+    sorted_arr[lo] * (1.0 - w) + sorted_arr[hi] * w
+  end
+
+  day_window = lambda do |date|
+    start = zone.local(date.year, date.month, date.day)
+    [start.to_f, (start + 1.day).to_f]
+  end
+
+  rng = seed ? Random.new(seed) : Random.new
+  bsz = bootstrap_samples.to_i
+  raise ArgumentError, "bootstrap_samples must be >= 1000" if bsz < 1000
+
+  # Windows
+  today_date = now.to_date
+  today_start = now.to_f
+  today_end   = now.end_of_day.to_f
+  next_hour_start = now.to_f
+  next_hour_end   = next_hour_start + 3600.0
+
+  # Simulate next times
+  boot_next = Array.new(bsz)
+
+  bsz.times do |j|
+    tries = 0
+    chosen = nil
+
+    begin
+      idx = pick_index.call(rng)
+      candidate = intervals[idx]
+      tries += 1
+
+      if !conditional_on_elapsed || candidate > time_since_last
+        chosen = candidate
+      end
+    end while chosen.nil? && tries < max_resample_tries
+
+    # Fallback if elapsed conditioning makes it impossible (e.g., elapsed > max interval)
+    if chosen.nil?
+      # Pick the largest interval (or you could switch to a parametric tail here)
+      chosen = intervals.max
+    end
+
+    boot_next[j] = last_ts + chosen
+  end
+
+  boot_next.sort!
+
+  # Point prediction: use median of bootstrap distribution
+  q50_ts = quantile.call(boot_next, 0.50)
+  pred_time = Time.at(q50_ts).in_time_zone(zone)
+  pred_date = pred_time.to_date
+
+  pred_day_start, pred_day_end = day_window.call(pred_date)
+
+  # Probabilities
+  prob_pred_day  = boot_next.count { |t| t >= pred_day_start && t < pred_day_end }.to_f / bsz
+  prob_today     = boot_next.count { |t| t >= today_start    && t < today_end    }.to_f / bsz
+  prob_next_hour = boot_next.count { |t| t >= next_hour_start && t < next_hour_end }.to_f / bsz
+
+  # Prediction intervals
+  q05 = quantile.call(boot_next, 0.05)
+  q25 = quantile.call(boot_next, 0.25)
+  q75 = quantile.call(boot_next, 0.75)
+  q95 = quantile.call(boot_next, 0.95)
+
+  interval_50 = { start: Time.at(q25).in_time_zone(zone), end: Time.at(q75).in_time_zone(zone) }
+  interval_90 = { start: Time.at(q05).in_time_zone(zone), end: Time.at(q95).in_time_zone(zone) }
+
+  description = [
+    "Renewal bootstrap (#{bsz} sims) sampling inter-arrival intervals (with replacement).",
+    "Recency weighting: half_life_intervals=#{half_life_intervals}.",
+    "Condition on elapsed=#{conditional_on_elapsed} (only sample intervals > time since last).",
+    "Now: #{now.strftime("%a %b %d %Y %I:%M:%S %p %Z")}.",
+    "Time since last event: #{(time_since_last/3600.0).round(2)} hours.",
+    "Point prediction (bootstrap median): #{pred_time.strftime("%a %b %d %Y %I:%M:%S %p %Z")} (predicted day #{pred_date}).",
+    "P(on predicted day)=#{(prob_pred_day * 100).round(1)}%.",
+    "P(by end of today)=#{(prob_today * 100).round(1)}%.",
+    "P(within next hour)=#{(prob_next_hour * 100).round(1)}%.",
+    "50% PI=[#{interval_50[:start].strftime("%b %d %I:%M %p")} – #{interval_50[:end].strftime("%b %d %I:%M %p")}],",
+    "90% PI=[#{interval_90[:start].strftime("%b %d %I:%M %p")} – #{interval_90[:end].strftime("%b %d %I:%M %p")}]."
+  ].join(" ")
+
+  {
+    pred_time: pred_time,
+    pred_day_probability: prob_pred_day,
+    today_probability: prob_today,
+    next_hour_probability: prob_next_hour,
+    pred_interval_50: interval_50,
+    pred_interval_90: interval_90,
+    description: description
+  }
+end

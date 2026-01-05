@@ -181,12 +181,10 @@ def build_timer_message_three(timers: nil)
           pred_interval_90: {
             start: Time.at(r["pred_interval_90"]["start"]).in_time_zone(tz),
             end: Time.at(r["pred_interval_90"]["end"]).in_time_zone(tz)
-          },
-          mae_seconds: r["mae_seconds"],
-          rmse_seconds: r["rmse_seconds"]
+          }
         }
       else
-        result = bootstrap_quake_probabilities(timestamps, tz: tz)
+        result = renewal_bootstrap_probabilities(timestamps, tz: tz)
 
         cache_payload = {
           updated_at: Time.now.to_i,
@@ -202,9 +200,7 @@ def build_timer_message_three(timers: nil)
             pred_interval_90: {
               start: result[:pred_interval_90][:start].to_f,
               end: result[:pred_interval_90][:end].to_f
-            },
-            mae_seconds: result[:mae_seconds],
-            rmse_seconds: result[:rmse_seconds]
+            }
           }
         }
         Setting.save_by_key("quake_prediction_cache", cache_payload.to_json)
@@ -216,9 +212,6 @@ def build_timer_message_three(timers: nil)
       prob_next_hour = result[:next_hour_probability]
       interval_50 = result[:pred_interval_50]
       interval_90 = result[:pred_interval_90]
-      mae = result[:mae_seconds]
-      rmse = result[:rmse_seconds]
-
       embeds << Proc.new {|embed|
         embed.title = "Quake Prediction (Bootstrap)"
         embed.color = 9807270 # A distinct color (e.g., brownish/red)
